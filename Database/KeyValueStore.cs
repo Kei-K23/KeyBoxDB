@@ -7,6 +7,7 @@ namespace KeyBoxDB.Database
     {
         private readonly ConcurrentDictionary<string, Record> _store;
         private readonly StorageEngine _storageEngine;
+        private readonly ReaderWriterLockSlim _look = new ReaderWriterLockSlim();
 
         public KeyValueStore(string databasePath)
         {
@@ -28,22 +29,30 @@ namespace KeyBoxDB.Database
 
         public string Get(string key)
         {
-            if (_store.TryGetValue(key, out var record))
+            _look.EnterReadLock();
+            try
             {
-                return record.Value;
+                if (_store.TryGetValue(key, out var record))
+                {
+                    return record.Value;
+                }
+                throw new KeyNotFoundException($"Key: '{key}' not found.");
             }
-            throw new KeyNotFoundException($"Key: '{key}' not found.");
+            finally
+            {
+                _look.ExitReadLock();
+            }
         }
 
         public void Update(string key, string newValue)
         {
-            if (!_store.ContainsKey(key))
+            if (!_store.TryGetValue(key, out Record? value))
             {
                 throw new KeyNotFoundException($"Key: '{key}' not found.");
             }
 
-            _store[key].Value = newValue;
-            _store[key].Timestamp = DateTime.UtcNow;
+            value.Value = newValue;
+            value.Timestamp = DateTime.UtcNow;
 
             Persist();
         }
@@ -60,12 +69,29 @@ namespace KeyBoxDB.Database
 
         public IEnumerable<Record> GetAll()
         {
-            return _store.Values;
+            _look.EnterReadLock();
+            try
+            {
+                return _store.Values.ToList();
+            }
+            finally
+            {
+                _look.ExitReadLock();
+            }
         }
 
         private void Persist()
         {
-            _storageEngine.Save(_store);
+            _look.EnterWriteLock();
+            try
+            {
+                _storageEngine.Save(_store);
+            }
+            finally
+            {
+                _look.ExitWriteLock();
+
+            }
         }
     }
 }
