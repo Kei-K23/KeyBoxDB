@@ -6,6 +6,8 @@ namespace KeyBoxDB.Database
     public class KeyValueStore
     {
         private readonly ConcurrentDictionary<string, Record> _store;
+        // Using Concurrent Directory as in-memory indexing for quick lookup data
+        private readonly ConcurrentDictionary<string, long> _index;
         private readonly StorageEngine _storageEngine;
         private readonly ReaderWriterLockSlim _look = new();
         private readonly CancellationTokenSource _cancellationTokenSource = new();
@@ -14,6 +16,10 @@ namespace KeyBoxDB.Database
         {
             _storageEngine = new StorageEngine(databasePath);
             _store = _storageEngine.Load();
+            _index = new ConcurrentDictionary<string, long>();
+
+            // Start in-memory indexing store
+            BuildIndex();
 
             // Start the background checking thread
             Task.Run(() => CleanupExpiredKey(_cancellationTokenSource.Token));
@@ -26,8 +32,11 @@ namespace KeyBoxDB.Database
                 throw new InvalidOperationException($"Key: '{key}' already exists.");
             }
 
-            _store[key] = new Record { Key = key, Value = value, ExpirationDate = ttl.HasValue ? DateTime.UtcNow.Add(ttl.Value) : null };
+            var record = new Record { Key = key, Value = value, ExpirationDate = ttl.HasValue ? DateTime.UtcNow.Add(ttl.Value) : null };
             // Save the value
+            _store[key] = record;
+            // Save the index
+            _index[key] = record.Timestamp.Ticks;
             Persist();
         }
 
@@ -36,7 +45,7 @@ namespace KeyBoxDB.Database
             _look.EnterReadLock();
             try
             {
-                if (_store.TryGetValue(key, out var record))
+                if (_index.ContainsKey(key) && _store.TryGetValue(key, out var record))
                 {
                     if (record.IsExpired())
                     {
@@ -76,6 +85,7 @@ namespace KeyBoxDB.Database
             value.Timestamp = DateTime.UtcNow;
             value.ExpirationDate = ttl.HasValue ? DateTime.UtcNow.Add(ttl.Value) : null;
 
+            _index[key] = value.Timestamp.Ticks;
             Persist();
         }
 
@@ -85,6 +95,7 @@ namespace KeyBoxDB.Database
             {
                 throw new KeyNotFoundException($"Key: '{key}' not found.");
             }
+            _index.TryRemove(key, out _);
 
             Persist();
         }
@@ -119,6 +130,7 @@ namespace KeyBoxDB.Database
                     if (_store[key].IsExpired())
                     {
                         _store.TryRemove(key, out _);
+                        _index.TryRemove(key, out _);
                     }
                 }
                 Persist();
@@ -139,6 +151,26 @@ namespace KeyBoxDB.Database
             {
                 _look.ExitWriteLock();
 
+            }
+        }
+
+        private void BuildIndex()
+        {
+            _look.EnterWriteLock();
+            try
+            {
+                // Fill in-memory data from store
+                foreach (var (key, record) in _store)
+                {
+                    if (!record.IsExpired())
+                    {
+                        _index[key] = record.Timestamp.Ticks;
+                    }
+                }
+            }
+            finally
+            {
+                _look.ExitWriteLock();
             }
         }
     }
