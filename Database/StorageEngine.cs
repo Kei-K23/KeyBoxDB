@@ -6,7 +6,7 @@ namespace KeyBoxDB.Database
 {
     public class StorageEngine(string filePath)
     {
-        private string _filePath = filePath;
+        private readonly string _filePath = filePath;
 
         public void Save(ConcurrentDictionary<string, Record> data)
         {
