@@ -18,16 +18,21 @@ namespace KeyBoxDB.Database
 
         public ConcurrentDictionary<string, Record> Load()
         {
-            var emptyData = new ConcurrentDictionary<string, Record>();
-            // Not found database file, then return new empty record
-            if (!File.Exists(_filePath))
-            {
-                return emptyData;
-            }
+            if (!File.Exists(_filePath) || new FileInfo(_filePath).Length == 0)
+                return new ConcurrentDictionary<string, Record>();
 
-            // Read JSON string data from database file and convert to JSON object
-            var jsonStrData = File.ReadAllText(_filePath);
-            return JsonSerializer.Deserialize<ConcurrentDictionary<string, Record>>(jsonStrData) ?? emptyData;
+            try
+            {
+                var jsonData = File.ReadAllText(_filePath);
+                return JsonSerializer.Deserialize<ConcurrentDictionary<string, Record>>(jsonData)
+                       ?? new ConcurrentDictionary<string, Record>();
+            }
+            catch (JsonException)
+            {
+                Console.WriteLine("Error: Invalid JSON data in the storage file. Starting with a fresh database.");
+                return new ConcurrentDictionary<string, Record>();
+            }
         }
+
     }
 }
