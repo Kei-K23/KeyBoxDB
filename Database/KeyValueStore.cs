@@ -7,7 +7,7 @@ namespace KeyBoxDB.Database
     {
         private readonly ConcurrentDictionary<string, Record> _store;
         private readonly StorageEngine _storageEngine;
-        private readonly ReaderWriterLockSlim _look = new ReaderWriterLockSlim();
+        private readonly ReaderWriterLockSlim _look = new();
 
         public KeyValueStore(string databasePath)
         {

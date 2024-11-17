@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.IO.Compression;
 using System.Text.Json;
 using KeyBoxDB.Models;
 
@@ -10,10 +11,21 @@ namespace KeyBoxDB.Database
 
         public void Save(ConcurrentDictionary<string, Record> data)
         {
-            // Convert JSON object into JSON string
-            var jsonData = JsonSerializer.Serialize(data);
-            // Write to file
-            File.WriteAllText(_filePath, jsonData);
+            try
+            {
+                using var fileStream = File.Create(_filePath);
+                using var gzipStream = new GZipStream(fileStream, CompressionMode.Compress);
+                using var writer = new StreamWriter(gzipStream);
+
+                // Convert JSON object into JSON string
+                var jsonData = JsonSerializer.Serialize(data);
+                // Write to file
+                writer.Write(jsonData);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error saving database: {ex.Message}");
+            }
         }
 
         public ConcurrentDictionary<string, Record> Load()
@@ -23,7 +35,12 @@ namespace KeyBoxDB.Database
 
             try
             {
-                var jsonData = File.ReadAllText(_filePath);
+                using var fileStream = File.OpenRead(_filePath);
+                using var gzipStream = new GZipStream(fileStream, CompressionMode.Decompress);
+                using var reader = new StreamReader(gzipStream);
+
+                var jsonData = reader.ReadToEnd();
+
                 return JsonSerializer.Deserialize<ConcurrentDictionary<string, Record>>(jsonData)
                        ?? new ConcurrentDictionary<string, Record>();
             }

@@ -5,7 +5,7 @@ class Program
     // Main entry point of the program
     static void Main()
     {
-        string databasePath = "Data/database.json";
+        string databasePath = "database.json";
         var keyValueStore = new KeyValueStore(databasePath);
 
         Console.WriteLine("Welcome to the KeyBoxDB!");
