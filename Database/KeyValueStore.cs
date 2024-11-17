@@ -8,21 +8,25 @@ namespace KeyBoxDB.Database
         private readonly ConcurrentDictionary<string, Record> _store;
         private readonly StorageEngine _storageEngine;
         private readonly ReaderWriterLockSlim _look = new();
+        private readonly CancellationTokenSource _cancellationTokenSource = new();
 
         public KeyValueStore(string databasePath)
         {
             _storageEngine = new StorageEngine(databasePath);
             _store = _storageEngine.Load();
+
+            // Start the background checking thread
+            Task.Run(() => CleanupExpiredKey(_cancellationTokenSource.Token));
         }
 
-        public void Add(string key, string value)
+        public void Add(string key, string value, TimeSpan? ttl = null)
         {
             if (_store.ContainsKey(key))
             {
                 throw new InvalidOperationException($"Key: '{key}' already exists.");
             }
 
-            _store[key] = new Record { Key = key, Value = value };
+            _store[key] = new Record { Key = key, Value = value, ExpirationDate = ttl.HasValue ? DateTime.UtcNow.Add(ttl.Value) : null };
             // Save the value
             Persist();
         }
@@ -34,6 +38,15 @@ namespace KeyBoxDB.Database
             {
                 if (_store.TryGetValue(key, out var record))
                 {
+                    if (record.IsExpired())
+                    {
+                        _look.ExitReadLock();
+                        // Delete the key
+                        Delete(key);
+                        _look.EnterReadLock();
+                        throw new KeyNotFoundException($"Key '{key}' has expired.");
+                    }
+
                     return record.Value;
                 }
                 throw new KeyNotFoundException($"Key: '{key}' not found.");
@@ -44,15 +57,24 @@ namespace KeyBoxDB.Database
             }
         }
 
-        public void Update(string key, string newValue)
+        public void Update(string key, string newValue, TimeSpan? ttl = null)
         {
+
             if (!_store.TryGetValue(key, out Record? value))
             {
                 throw new KeyNotFoundException($"Key: '{key}' not found.");
             }
 
+            if (value.IsExpired())
+            {
+                // Delete the key
+                Delete(key);
+                throw new KeyNotFoundException($"Key '{key}' has expired.");
+            }
+
             value.Value = newValue;
             value.Timestamp = DateTime.UtcNow;
+            value.ExpirationDate = ttl.HasValue ? DateTime.UtcNow.Add(ttl.Value) : null;
 
             Persist();
         }
@@ -77,6 +99,32 @@ namespace KeyBoxDB.Database
             finally
             {
                 _look.ExitReadLock();
+            }
+        }
+
+        // Method to stop the background checking thread by sending cancel signal
+        public void Dispose()
+        {
+            _cancellationTokenSource.Cancel();
+            _look.Dispose(); // Release all resources
+        }
+
+        private void CleanupExpiredKey(CancellationToken cancellationToken)
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                foreach (var key in _store.Keys.ToList())
+                {
+                    // If key is expired, remove that record
+                    if (_store[key].IsExpired())
+                    {
+                        _store.TryRemove(key, out _);
+                    }
+                }
+                Persist();
+
+                // Run this loop every 5 seconds. Background checking
+                Thread.Sleep(5000); // 5 seconds
             }
         }
 
