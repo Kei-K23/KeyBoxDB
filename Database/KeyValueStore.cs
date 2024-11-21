@@ -9,8 +9,10 @@ namespace KeyBoxDB.Database
         // Using Concurrent Directory as in-memory indexing for quick lookup data
         private readonly ConcurrentDictionary<string, long> _index;
         private readonly StorageEngine _storageEngine;
-        private readonly ReaderWriterLockSlim _look = new();
+        private readonly ReaderWriterLockSlim _lock = new();
         private readonly CancellationTokenSource _cancellationTokenSource = new();
+        private Transaction _currentTransaction;
+        private bool _isInTransaction;
 
         public KeyValueStore(string databasePath)
         {
@@ -25,34 +27,119 @@ namespace KeyBoxDB.Database
             Task.Run(() => CleanupExpiredKey(_cancellationTokenSource.Token));
         }
 
+
+        public void BeginTransaction()
+        {
+            _lock.EnterWriteLock();
+            try
+            {
+                if (_isInTransaction)
+                    throw new InvalidOperationException("A transaction is already in progress.");
+
+                _currentTransaction = new Transaction();
+                _isInTransaction = true;
+            }
+            finally
+            {
+                _lock.ExitWriteLock();
+            }
+        }
+
+        public void CommitTransaction()
+        {
+            _lock.EnterWriteLock();
+            try
+            {
+                if (!_isInTransaction)
+                    throw new InvalidOperationException("No transaction in progress.");
+
+                // Apply pending changes
+                foreach (var (key, record) in _currentTransaction.GetPendingStore())
+                {
+                    _store[key] = record;
+                    _index[key] = record.Timestamp.Ticks;
+                }
+
+                foreach (var key in _currentTransaction.GetPendingDelete())
+                {
+                    _store.TryRemove(key, out _);
+                    _index.TryRemove(key, out _);
+                }
+
+                // Persist changes to disk
+                Persist();
+
+                // Clear transaction state
+                _currentTransaction = null;
+                _isInTransaction = false;
+            }
+            finally
+            {
+                _lock.ExitWriteLock();
+            }
+        }
+
+        public void RollbackTransaction()
+        {
+            _lock.EnterWriteLock();
+            try
+            {
+                if (!_isInTransaction)
+                    throw new InvalidOperationException("No transaction in progress.");
+
+                // Discard pending changes
+                _currentTransaction = null;
+                _isInTransaction = false;
+            }
+            finally
+            {
+                _lock.ExitWriteLock();
+            }
+        }
+
+
         public void Add(string key, string value, TimeSpan? ttl = null)
         {
-            if (_store.ContainsKey(key))
+            if (_isInTransaction)
             {
-                throw new InvalidOperationException($"Key: '{key}' already exists.");
+                var record = new Record
+                {
+                    Key = key,
+                    Value = value,
+                    ExpirationDate = ttl.HasValue ? DateTime.UtcNow.Add(ttl.Value) : null
+                };
+                _currentTransaction.Add(key, record);
+                return;
             }
 
-            var record = new Record { Key = key, Value = value, ExpirationDate = ttl.HasValue ? DateTime.UtcNow.Add(ttl.Value) : null };
-            // Save the value
-            _store[key] = record;
-            // Save the index
-            _index[key] = record.Timestamp.Ticks;
+            if (_store.ContainsKey(key))
+                throw new InvalidOperationException($"Key '{key}' already exists.");
+
+            var newRecord = new Record
+            {
+                Key = key,
+                Value = value,
+                ExpirationDate = ttl.HasValue ? DateTime.UtcNow.Add(ttl.Value) : null
+            };
+
+            _store[key] = newRecord;
+            _index[key] = newRecord.Timestamp.Ticks;
             Persist();
         }
 
         public string Get(string key)
         {
-            _look.EnterReadLock();
+            _lock.EnterReadLock();
             try
             {
                 if (_index.ContainsKey(key) && _store.TryGetValue(key, out var record))
                 {
                     if (record.IsExpired())
                     {
-                        _look.ExitReadLock();
+                        _lock.ExitReadLock();
                         // Delete the key
                         Delete(key);
-                        _look.EnterReadLock();
+                        _lock.EnterReadLock();
                         throw new KeyNotFoundException($"Key '{key}' has expired.");
                     }
 
@@ -62,7 +149,7 @@ namespace KeyBoxDB.Database
             }
             finally
             {
-                _look.ExitReadLock();
+                _lock.ExitReadLock();
             }
         }
 
@@ -91,25 +178,29 @@ namespace KeyBoxDB.Database
 
         public void Delete(string key)
         {
-            if (!_store.TryRemove(key, out _))
+            if (_isInTransaction)
             {
-                throw new KeyNotFoundException($"Key: '{key}' not found.");
+                _currentTransaction.Delete(key);
+                return;
             }
-            _index.TryRemove(key, out _);
 
+            if (!_store.TryRemove(key, out _))
+                throw new KeyNotFoundException($"Key '{key}' not found.");
+
+            _index.TryRemove(key, out _);
             Persist();
         }
 
         public IEnumerable<Record> GetAll()
         {
-            _look.EnterReadLock();
+            _lock.EnterReadLock();
             try
             {
                 return _store.Values.ToList();
             }
             finally
             {
-                _look.ExitReadLock();
+                _lock.ExitReadLock();
             }
         }
 
@@ -117,7 +208,7 @@ namespace KeyBoxDB.Database
         public void Dispose()
         {
             _cancellationTokenSource.Cancel();
-            _look.Dispose(); // Release all resources
+            _lock.Dispose(); // Release all resources
         }
 
         private void CleanupExpiredKey(CancellationToken cancellationToken)
@@ -142,21 +233,21 @@ namespace KeyBoxDB.Database
 
         private void Persist()
         {
-            _look.EnterWriteLock();
+            _lock.EnterWriteLock();
             try
             {
                 _storageEngine.Save(_store);
             }
             finally
             {
-                _look.ExitWriteLock();
+                _lock.ExitWriteLock();
 
             }
         }
 
         private void BuildIndex()
         {
-            _look.EnterWriteLock();
+            _lock.EnterWriteLock();
             try
             {
                 // Fill in-memory data from store
@@ -170,7 +261,7 @@ namespace KeyBoxDB.Database
             }
             finally
             {
-                _look.ExitWriteLock();
+                _lock.ExitWriteLock();
             }
         }
     }
